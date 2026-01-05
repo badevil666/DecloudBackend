@@ -1,35 +1,32 @@
-// Database configuration
-// This is a placeholder for database setup
-// Uncomment and configure based on your database choice
+// Neon (PostgreSQL) database configuration using `pg`
+const { Pool } = require('pg');
+require('dotenv').config();
 
-// Example for MongoDB with Mongoose:
-// const mongoose = require('mongoose');
-// 
-// const connectDB = async () => {
-//   try {
-//     const conn = await mongoose.connect(process.env.MONGODB_URI);
-//     console.log(`MongoDB Connected: ${conn.connection.host}`);
-//   } catch (error) {
-//     console.error(`Error: ${error.message}`);
-//     process.exit(1);
-//   }
-// };
-// 
-// module.exports = connectDB;
+if (!process.env.DATABASE_URL) {
+  console.warn(
+    '[database] DATABASE_URL is not set. Neon connection will fail until this is configured.'
+  );
+}
 
-// Example for PostgreSQL with pg:
-// const { Pool } = require('pg');
-// 
-// const pool = new Pool({
-//   user: process.env.DB_USER,
-//   host: process.env.DB_HOST,
-//   database: process.env.DB_NAME,
-//   password: process.env.DB_PASSWORD,
-//   port: process.env.DB_PORT || 5432,
-// });
-// 
-// module.exports = pool;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false, // Neon uses SSL, connection string usually has sslmode=require
+  },
+  idleTimeoutMillis: 30000,
+});
 
-module.exports = {};
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle PostgreSQL client', err);
+});
 
+/**
+ * Helper to run queries easily:
+ *   const { rows } = await query('SELECT now()');
+ */
+const query = (text, params) => pool.query(text, params);
 
+module.exports = {
+  pool,
+  query,
+};

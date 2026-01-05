@@ -23,6 +23,7 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api', require('./routes/index'));
+app.use('/auth', require('./routes/auth'));
 
 // 404 Handler
 app.use((req, res) => {
