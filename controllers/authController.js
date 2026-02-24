@@ -15,11 +15,15 @@ const validateEthAddress = (address) => {
   return ethers.getAddress(address).toLowerCase();
 };
 
-// POST /auth/request-nonce
+// Get /auth/nonce
 // Body: { wallet_address }
 const requestNonce = async (req, res, next) => {
   try {
     const { wallet_address } = req.body;
+    if(!wallet_address || typeof wallet_address !== 'string') 
+    {
+      return res.status(400).json({ error: 'wallet_address is required' });
+    }
 
     const normalizedWallet = validateEthAddress(wallet_address);
     let nonce = crypto.randomBytes(32).toString('hex');

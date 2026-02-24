@@ -6,6 +6,9 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const api = require('./routes/index');
+const auth = require('./routes/auth');
+
 // Middleware
 app.use(cors());
 app.use(morgan('dev'));
@@ -22,8 +25,8 @@ app.get('/', (req, res) => {
 });
 
 // API Routes
-app.use('/api', require('./routes/index'));
-app.use('/auth', require('./routes/auth'));
+app.use('/api', api);
+app.use('/auth', auth);
 
 // 404 Handler
 app.use((req, res) => {
