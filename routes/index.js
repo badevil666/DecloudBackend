@@ -24,6 +24,7 @@ router.get('/db-check', async (req, res, next) => {
 // Add more routes here
 // router.use('/users', require('./users'));
 // router.use('/products', require('./products'));
+router.use('/nodes', require('./nodes'));
 
 module.exports = router;
 
