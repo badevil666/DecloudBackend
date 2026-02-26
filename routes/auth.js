@@ -3,9 +3,9 @@ const router = express.Router();
 const { requestNonce, verify } = require('../controllers/authController');
 console.log("AUTH ROUTER LOADED");
 
-router.get('/nonce', requestNonce);
+router.post('/nonce', requestNonce);
 
-router.post('/nonce', (req, res) => {
+router.get('/nonce', (req, res) => {
     res.json({
         message: 'This endpoint expects a get request with a valid wallet addresss'
     });
