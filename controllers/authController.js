@@ -20,8 +20,7 @@ const validateEthAddress = (address) => {
 const requestNonce = async (req, res, next) => {
   try {
     const { wallet_address } = req.body;
-    if(!wallet_address || typeof wallet_address !== 'string') 
-    {
+    if (!wallet_address || typeof wallet_address !== 'string') {
       return res.status(400).json({ error: 'wallet_address is required' });
     }
 
@@ -103,9 +102,8 @@ const verifyNonceAndSignature = async ({ walletAddress, nonce, signature }) => {
   }
 
   const normalizedRecovered = recoveredAddress.toLowerCase();
-  console.log('normalizedRecovered', normalizedRecovered); 
+  console.log('normalizedRecovered', normalizedRecovered);
   console.log('normalizedWallet', normalizedWallet)
-  
 
   if (normalizedRecovered !== normalizedWallet) {
     const err = new Error('Signature verification failed');
@@ -117,12 +115,12 @@ const verifyNonceAndSignature = async ({ walletAddress, nonce, signature }) => {
     'UPDATE auth_nonces SET used = true WHERE nonce = $1 AND wallet_address = $2',
     [nonce, normalizedWallet]
   );
-
   return { walletAddress: normalizedWallet };
 };
 
 // POST /auth/verify
 // Body: { wallet_address, nonce, signature, mode, role, os_type?, declared_capacity? }
+
 const verify = async (req, res, next) => {
   try {
     const {
