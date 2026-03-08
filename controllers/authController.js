@@ -15,9 +15,9 @@ const validateEthAddress = (address) => {
   return ethers.getAddress(address).toLowerCase();
 };
 
-// Get /auth/nonce
+// Shared handler for all GET login/register endpoints
 // Body: { wallet_address }
-const requestNonce = async (req, res, next) => {
+const getNonce = async (req, res, next) => {
   try {
     const { wallet_address } = req.body;
     if (!wallet_address || typeof wallet_address !== 'string') {
@@ -29,11 +29,6 @@ const requestNonce = async (req, res, next) => {
     nonce = `Decloud nonce: ${nonce}`;
     const issuedAt = new Date();
     const expiresAt = new Date(issuedAt.getTime() + 10 * 60 * 1000);
-
-    console.log('nonce', nonce);
-    console.log('normalizedWallet', normalizedWallet);
-    console.log('issuedAt', issuedAt);
-    console.log('expiresAt', expiresAt);
 
     await query(
       `INSERT INTO auth_nonces (nonce, wallet_address, issued_at, expires_at, used)
@@ -78,7 +73,6 @@ const verifyNonceAndSignature = async ({ walletAddress, nonce, signature }) => {
   }
 
   const row = result.rows[0];
-  console.log('row', row);
   if (row.used) {
     const err = new Error('Nonce already used');
     err.status = 401;
@@ -94,18 +88,13 @@ const verifyNonceAndSignature = async ({ walletAddress, nonce, signature }) => {
   let recoveredAddress;
   try {
     recoveredAddress = ethers.verifyMessage(nonce, signature);
-
   } catch (e) {
     const err = new Error('Invalid signature');
     err.status = 401;
     throw err;
   }
 
-  const normalizedRecovered = recoveredAddress.toLowerCase();
-  console.log('normalizedRecovered', normalizedRecovered);
-  console.log('normalizedWallet', normalizedWallet)
-
-  if (normalizedRecovered !== normalizedWallet) {
+  if (recoveredAddress.toLowerCase() !== normalizedWallet) {
     const err = new Error('Signature verification failed');
     err.status = 401;
     throw err;
@@ -118,138 +107,131 @@ const verifyNonceAndSignature = async ({ walletAddress, nonce, signature }) => {
   return { walletAddress: normalizedWallet };
 };
 
-// POST /auth/verify
-// Body: { wallet_address, nonce, signature, mode, role, os_type?, declared_capacity? }
+const signToken = (subjectId, role, walletAddress) =>
+  jwt.sign(
+    { sub: subjectId, role, wallet_address: walletAddress },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
 
-const verify = async (req, res, next) => {
+// POST /client/login
+// Body: { wallet_address, nonce, signature }
+const clientLogin = async (req, res, next) => {
   try {
-    const {
-      wallet_address,
-      nonce,
-      signature,
-      mode,
-      role,
-      os_type,
-      declared_capacity,
-    } = req.body;
+    const { wallet_address, nonce, signature } = req.body;
+    const { walletAddress } = await verifyNonceAndSignature({ walletAddress: wallet_address, nonce, signature });
 
-    const upperMode = typeof mode === 'string' ? mode.toUpperCase() : '';
-    const upperRole = typeof role === 'string' ? role.toUpperCase() : '';
-
-    if (!['LOGIN', 'REGISTER'].includes(upperMode)) {
-      return res.status(400).json({ error: 'Invalid mode' });
+    const existing = await query(
+      'SELECT client_id FROM clients WHERE wallet_address = $1',
+      [walletAddress]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(401).json({ error: 'Client not registered' });
     }
 
-    if (!['CLIENT', 'STORAGE_PEER'].includes(upperRole)) {
-      return res.status(400).json({ error: 'Invalid role' });
-    }
-
-    if (upperMode === 'REGISTER' && upperRole === 'STORAGE_PEER') {
-      if (!os_type || typeof os_type !== 'string') {
-        return res.status(400).json({ error: 'os_type is required for STORAGE_PEER registration' });
-      }
-      if (
-        declared_capacity === undefined ||
-        declared_capacity === null ||
-        typeof declared_capacity !== 'number' ||
-        declared_capacity <= 0
-      ) {
-        return res.status(400).json({ error: 'declared_capacity must be a positive number' });
-      }
-    }
-
-    const { walletAddress } = await verifyNonceAndSignature({
-      walletAddress: wallet_address,
-      nonce,
-      signature,
-    });
-
-    let subjectId;
-
-    if (upperMode === 'REGISTER') {
-      if (upperRole === 'CLIENT') {
-        const existing = await query(
-          'SELECT client_id FROM clients WHERE wallet_address = $1',
-          [walletAddress]
-        );
-
-        if (existing.rows.length > 0) {
-          return res.status(409).json({ error: 'Client already registered' });
-        }
-
-        const inserted = await query(
-          'INSERT INTO clients (wallet_address) VALUES ($1) RETURNING client_id',
-          [walletAddress]
-        );
-
-        subjectId = inserted.rows[0].client_id;
-      } else if (upperRole === 'STORAGE_PEER') {
-        const existing = await query(
-          'SELECT peer_id FROM storage_peers WHERE wallet_address = $1',
-          [walletAddress]
-        );
-
-        if (existing.rows.length > 0) {
-          return res.status(409).json({ error: 'Storage peer already registered' });
-        }
-
-        const inserted = await query(
-          `INSERT INTO storage_peers (wallet_address, os_type, declared_capacity, verified_capacity, peer_status)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING peer_id`,
-          [walletAddress, os_type, declared_capacity, 0, 'PENDING']
-        );
-
-        subjectId = inserted.rows[0].peer_id;
-      }
-    } else if (upperMode === 'LOGIN') {
-      if (upperRole === 'CLIENT') {
-        const existing = await query(
-          'SELECT client_id FROM clients WHERE wallet_address = $1',
-          [walletAddress]
-        );
-
-        if (existing.rows.length === 0) {
-          return res.status(401).json({ error: 'Client not registered' });
-        }
-
-        subjectId = existing.rows[0].client_id;
-      } else if (upperRole === 'STORAGE_PEER') {
-        const existing = await query(
-          'SELECT peer_id FROM storage_peers WHERE wallet_address = $1',
-          [walletAddress]
-        );
-
-        if (existing.rows.length === 0) {
-          return res.status(401).json({ error: 'Storage peer not registered' });
-        }
-
-        subjectId = existing.rows[0].peer_id;
-      }
-    }
-
-    const tokenPayload = {
-      sub: subjectId,
-      role: upperRole,
-      wallet_address: walletAddress,
-    };
-
-    const token = jwt.sign(tokenPayload, JWT_SECRET, {
-      expiresIn: JWT_EXPIRES_IN,
-    });
-
-    res.json({ token });
+    res.json({ token: signToken(existing.rows[0].client_id, 'CLIENT', walletAddress) });
   } catch (error) {
-    if (error.status) {
-      return res.status(error.status).json({ error: error.message });
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+};
+
+// POST /client/register
+// Body: { wallet_address, nonce, signature }
+const clientRegister = async (req, res, next) => {
+  try {
+    const { wallet_address, nonce, signature } = req.body;
+    const { walletAddress } = await verifyNonceAndSignature({ walletAddress: wallet_address, nonce, signature });
+
+    const existing = await query(
+      'SELECT client_id FROM clients WHERE wallet_address = $1',
+      [walletAddress]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Client already registered' });
     }
+
+    const inserted = await query(
+      'INSERT INTO clients (wallet_address) VALUES ($1) RETURNING client_id',
+      [walletAddress]
+    );
+
+    res.status(201).json({ token: signToken(inserted.rows[0].client_id, 'CLIENT', walletAddress) });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+};
+
+// POST /peer/login
+// Body: { wallet_address, nonce, signature }
+const peerLogin = async (req, res, next) => {
+  try {
+    const { wallet_address, nonce, signature } = req.body;
+    const { walletAddress } = await verifyNonceAndSignature({ walletAddress: wallet_address, nonce, signature });
+
+    const existing = await query(
+      'SELECT peer_id FROM storage_peers WHERE wallet_address = $1',
+      [walletAddress]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(401).json({ error: 'Storage peer not registered' });
+    }
+
+    res.json({ token: signToken(existing.rows[0].peer_id, 'STORAGE_PEER', walletAddress) });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+};
+
+// POST /peer/register
+// Body: { wallet_address, nonce, signature, os_type, declared_capacity }
+const peerRegister = async (req, res, next) => {
+  try {
+    const { wallet_address, nonce, signature, os_type, declared_capacity } = req.body;
+
+    if (!os_type || typeof os_type !== 'string') {
+      return res.status(400).json({ error: 'os_type is required' });
+    }
+    if (
+      declared_capacity === undefined ||
+      declared_capacity === null ||
+      typeof declared_capacity !== 'number' ||
+      declared_capacity <= 0
+    ) {
+      return res.status(400).json({ error: 'declared_capacity must be a positive number' });
+    }
+
+    const { walletAddress } = await verifyNonceAndSignature({ walletAddress: wallet_address, nonce, signature });
+
+    const existing = await query(
+      'SELECT peer_id FROM storage_peers WHERE wallet_address = $1',
+      [walletAddress]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Storage peer already registered' });
+    }
+
+    const inserted = await query(
+      `INSERT INTO storage_peers (wallet_address, os_type, declared_capacity, verified_capacity, peer_status)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING peer_id`,
+      [walletAddress, os_type, declared_capacity, 0, 'PENDING']
+    );
+
+    res.status(201).json({ token: signToken(inserted.rows[0].peer_id, 'STORAGE_PEER', walletAddress) });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
     next(error);
   }
 };
 
 module.exports = {
-  requestNonce,
-  verify,
+  getNonce,
+  clientLogin,
+  clientRegister,
+  peerLogin,
+  peerRegister,
   verifyNonceAndSignature,
 };
-
