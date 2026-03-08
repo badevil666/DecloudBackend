@@ -7,7 +7,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const api = require('./routes/index');
-const auth = require('./routes/auth');
+const client = require('./routes/client');
+const peer = require('./routes/peer');
 
 // Middleware
 app.use(cors());
@@ -16,7 +17,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.json({
     message: 'Welcome to DecloudBackend API',
     status: 'running',
@@ -26,17 +27,18 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api', api);
-app.use('/auth', auth);
+app.use('/client', client);
+app.use('/peer', peer);
 
 // 404 Handler
-app.use((req, res) => {
+app.use((_req, res) => {
   res.status(404).json({
     error: 'Route not found'
   });
 });
 
 // Error Handler
-app.use((err, req, res, next) => {
+app.use((err, _req, res, _next) => {
   console.error(err.stack);
   res.status(err.status || 500).json({
     error: err.message || 'Internal Server Error'
