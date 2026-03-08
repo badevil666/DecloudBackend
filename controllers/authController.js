@@ -94,6 +94,9 @@ const verifyNonceAndSignature = async ({ walletAddress, nonce, signature }) => {
     throw err;
   }
 
+  console.log('recovered:', recoveredAddress.toLowerCase());
+  console.log('expected: ', normalizedWallet);
+
   if (recoveredAddress.toLowerCase() !== normalizedWallet) {
     const err = new Error('Signature verification failed');
     err.status = 401;

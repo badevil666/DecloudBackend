@@ -9,12 +9,14 @@ const PORT = process.env.PORT || 3000;
 const api = require('./routes/index');
 const client = require('./routes/client');
 const peer = require('./routes/peer');
+const logger = require('./middleware/logger');
 
 // Middleware
 app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(logger);
 
 // Routes
 app.get('/', (_req, res) => {
