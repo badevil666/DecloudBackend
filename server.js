@@ -1,7 +1,9 @@
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 require('dotenv').config();
+const { attachPeerWS } = require('./websocket/peerWS');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,7 +50,10 @@ app.use((err, _req, res, _next) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+const server = http.createServer(app);
+attachPeerWS(server);
+
+server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });

@@ -217,10 +217,10 @@ const peerRegister = async (req, res, next) => {
     }
 
     const inserted = await query(
-      `INSERT INTO storage_peers (wallet_address, os_type, declared_capacity, verified_capacity, peer_status)
+      `INSERT INTO storage_peers (wallet_address, os_type, declared_capacity, available_space, peer_status)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING peer_id`,
-      [walletAddress, os_type, declared_capacity, 0, 'PENDING']
+      [walletAddress, os_type, declared_capacity, declared_capacity, 'PENDING']
     );
 
     res.status(201).json({ token: signToken(inserted.rows[0].peer_id, 'STORAGE_PEER', walletAddress) });

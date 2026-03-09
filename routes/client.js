@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { getNonce, clientLogin, clientRegister } = require('../controllers/authController');
+const authenticate = require('../middleware/auth');
+const { uploadFile } = require('../controllers/uploadController');
+const { getFiles } = require('../controllers/fileController');
 
 /**
  * GET /client/login
@@ -70,16 +73,51 @@ router.get('/register', getNonce);
  */
 router.post('/register', clientRegister);
 
-router.get('/upload', (_req, res) => {
-  res.json({
-    message: 'This endpoint expects a post request with a valid wallet address and signature'
-  });
-});
+/**
+ * POST /client/upload
+ * Upload file metadata and chunk commitments.
+ * JWT (CLIENT role) must be included in the request body as "jwt".
+ *
+ * Request Body:
+ * {
+ *   "jwt": "string",
+ *   "filename": "video.mp4",
+ *   "filesize": 10485760,
+ *   "fileHash": "abc123...",
+ *   "numberOfChunks": 4,
+ *   "replicationFactor": 3,
+ *   "endDate": "2026-06-01T00:00:00.000Z",
+ *   "chunkInfo": [
+ *     {
+ *       "hash": "chunkHash0...",
+ *       "nonces": [
+ *         { "nonce": "deadbeef...", "hash": "combined_hash..." }
+ *       ]
+ *     }
+ *   ]
+ * }
+ *
+ * Response (201):
+ * {
+ *   "fileId": "uuid",
+ *   "merkleRoot": "hex",
+ *   "status": "PENDING"
+ * }
+ */
+router.post('/upload', authenticate('CLIENT'), uploadFile);
 
-router.post('/upload', (_req, res) => {
-  res.json({
-    message: 'This endpoint expects a post request with a valid wallet address and signature'
-  });
-});
+/**
+ * GET /client/files
+ * Returns all files uploaded by the authenticated client.
+ * Auth: Authorization: Bearer <token>
+ */
+router.get('/files', authenticate('CLIENT'), getFiles);
+
+/**
+ * GET /client/files/:fileId
+ * Returns full details for a single file — chunks, replica peers, relay tokens.
+ * Auth: Authorization: Bearer <token>
+ */
+router.get('/files/:fileId', authenticate('CLIENT'), getFiles);
 
 module.exports = router;
