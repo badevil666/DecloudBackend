@@ -2,8 +2,10 @@ const express = require('express');
 const router = express.Router();
 const { getNonce, clientLogin, clientRegister } = require('../controllers/authController');
 const authenticate = require('../middleware/auth');
-const { uploadFile } = require('../controllers/uploadController');
+const { uploadFile, confirmUpload, cancelUpload } = require('../controllers/uploadController');
 const { getFiles } = require('../controllers/fileController');
+const { submitClientDealSignature, getDealStatus, getFileDeals, getAllDeals } = require('../controllers/dealController');
+const { requestDownload } = require('../controllers/downloadController');
 
 /**
  * GET /client/login
@@ -107,6 +109,24 @@ router.post('/register', clientRegister);
 router.post('/upload', authenticate('CLIENT'), uploadFile);
 
 /**
+ * POST /client/upload/confirm
+ * Phase 2: commit a pending upload to the database (client confirmation).
+ *
+ * Request Body: { "sessionId": "uuid" }
+ * Response (201): { "fileId", "merkleRoot", "status": "ALLOCATED", "peers" }
+ */
+router.post('/upload/confirm', authenticate('CLIENT'), confirmUpload);
+
+/**
+ * POST /client/upload/cancel
+ * Explicitly cancel a pending upload before its 2-minute TTL expires.
+ *
+ * Request Body: { "sessionId": "uuid" }
+ * Response (200): { "cancelled": true }
+ */
+router.post('/upload/cancel', authenticate('CLIENT'), cancelUpload);
+
+/**
  * GET /client/files
  * Returns all files uploaded by the authenticated client.
  * Auth: Authorization: Bearer <token>
@@ -119,5 +139,42 @@ router.get('/files', authenticate('CLIENT'), getFiles);
  * Auth: Authorization: Bearer <token>
  */
 router.get('/files/:fileId', authenticate('CLIENT'), getFiles);
+
+/**
+ * POST /client/deals/:dealId/sign
+ * Submit an EIP-712 signature for a pending deal (client confirmation).
+ *
+ * Request Body: { "signature": "0x..." }
+ * Response (200): { "status": "accepted", "dealId": "0x..." }
+ */
+router.post('/deals/:dealId/sign', authenticate('CLIENT'), submitClientDealSignature);
+
+/**
+ * GET /client/deals/:dealId
+ * Poll the current state of a pending deal.
+ * Returns deal fields + clientSigned/peerSigned flags. Raw sigs are omitted.
+ */
+router.get('/deals/:dealId', authenticate('CLIENT'), getDealStatus);
+
+/**
+ * GET /client/files/:fileId/deals
+ * Returns all pending deals for a file that need the client's EIP-712 signature.
+ * Includes all fields required for signing (chunkHashes, merkleRoot, fileIdBytes32, etc).
+ *
+ * Response (200): { fileId, clientAddress, escrowAddress, deals[] }
+ */
+router.get('/files/:fileId/deals', authenticate('CLIENT'), getFileDeals);
+
+/**
+ * POST /client/files/:fileId/download
+ * Request a download manifest for a stored file.
+ * Coordinator picks best available replica per chunk, notifies peers via WS,
+ * and returns chunk list with relay tokens so the client can pull from the relay.
+ *
+ * Response (200): { fileId, filename, filesize, merkleRoot, relayUrl, chunks[] }
+ */
+router.post('/files/:fileId/download', authenticate('CLIENT'), requestDownload);
+
+router.get('/deals', authenticate('CLIENT'), getAllDeals);
 
 module.exports = router;

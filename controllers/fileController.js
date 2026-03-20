@@ -11,7 +11,7 @@ const getFiles = async (req, res, next) => {
   try {
     const { sub: clientId } = req.user;
     const { fileId } = req.params;
-
+    
     /* ── SINGLE FILE ─────────────────────────────────────────────────────── */
     if (fileId) {
       const fileResult = await query(
@@ -70,17 +70,17 @@ const getFiles = async (req, res, next) => {
         if (!chunkMap[row.chunkIndex]) {
           chunkMap[row.chunkIndex] = {
             chunkIndex: row.chunkIndex,
-            chunkHash:  row.chunkHash,
-            chunkSize:  row.chunkSize,
-            replicas:   [],
+            chunkHash: row.chunkHash,
+            chunkSize: row.chunkSize,
+            replicas: [],
           };
         }
         if (row.replicaIndex !== null) {
           chunkMap[row.chunkIndex].replicas.push({
-            replicaIndex:      row.replicaIndex,
-            peerId:            row.peerId,
-            status:            row.replicaStatus,
-            peerStatus:        row.peerStatus,
+            replicaIndex: row.replicaIndex,
+            peerId: row.peerId,
+            status: row.replicaStatus,
+            peerStatus: row.peerStatus,
             peerLastHeartbeat: row.peerLastHeartbeat,
           });
         }
@@ -101,7 +101,7 @@ const getFiles = async (req, res, next) => {
 
       return res.json({
         ...fileResult.rows[0],
-        chunks:        Object.values(chunkMap),
+        chunks: Object.values(chunkMap),
         relaySessions: relayResult.rows,
       });
     }

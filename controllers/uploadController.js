@@ -1,18 +1,48 @@
 const crypto = require('crypto');
 const { query } = require('../config/database');
 const { allocateAndNotify } = require('../services/relayTokenService');
+const { sendCancel } = require('../websocket/peerWS');
 
 const isHex = (str) => typeof str === 'string' && /^[0-9a-fA-F]+$/.test(str);
 
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
-/**
- * POST /client/upload
- * Requires auth middleware (CLIENT role).
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Pending upload store
+ *
+ * After phase 1 (POST /client/upload) the server holds allocation state here
+ * until the client confirms (POST /client/upload/confirm).
+ * Each entry has a TTL timer; expiry cancels the upload and notifies peers.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const PENDING_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
+// sessionId → { clientId, fileId, merkleRoot, endDate, filename, fileHash,
+//               filesize, replicationFactor, numberOfChunks, chunkInfo,
+//               allocations, peerDeductions, peerAssignments, timerId }
+const pendingUploads = new Map();
+
+function cancelPendingUpload(sessionId) {
+  const pending = pendingUploads.get(sessionId);
+  if (!pending) return;
+  clearTimeout(pending.timerId);
+  pendingUploads.delete(sessionId);
+
+  for (const [peerId, { token }] of Object.entries(pending.peerAssignments)) {
+    sendCancel(peerId, pending.fileId, token);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * PHASE 1  —  POST /client/upload
+ *
+ * Validates the request, runs greedy allocation, pushes chunk_assignment to
+ * each peer via WebSocket, and waits for their ACKs (= storage peer confirmation).
+ * Stores the allocation plan in pendingUploads under a sessionId and returns
+ * 202 so the client can review the allocation before confirming.
  *
  * Request Body:
  * {
- *   "token": "jwt_string",
  *   "filename": "video.mp4",
  *   "filesize": 10485760,
  *   "fileHash": "abc123...",
@@ -30,19 +60,16 @@ const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
  *   ]
  * }
  *
- * Response (201):
+ * Response (202):
  * {
+ *   "sessionId": "uuid",
  *   "fileId": "uuid",
  *   "merkleRoot": "hex",
- *   "status": "ALLOCATED",
- *   "peers": {
- *     "<peer_id>": { "token": "hex", "chunkIndexes": [0, 1] },
- *     "<peer_id>": { "token": "hex", "chunkIndexes": [2] }
- *   }
+ *   "peers": { "<peer_id>": { "token": "hex", "chunkIndexes": [0, 1] }, ... },
+ *   "expiresIn": 120
  * }
- */
+ * ───────────────────────────────────────────────────────────────────────────── */
 const uploadFile = async (req, res, next) => {
-  let txStarted = false;
   try {
     const {
       filename,
@@ -142,12 +169,13 @@ const uploadFile = async (req, res, next) => {
     );
 
     /* ================= PRE-GENERATE FILE ID ================= */
-    // Done before the transaction so we can include it in the WS push to peers.
+
     const fileId = crypto.randomUUID();
 
-    /* ================= ALLOCATE + NOTIFY PEERS (no DB writes yet) ================= */
-    // allocateAndNotify runs the greedy allocation in-memory, pushes WS assignments
-    // to each peer, and waits for ACKs (with retries). Only returns if all peers ACKed.
+    /* ================= ALLOCATE + NOTIFY PEERS (storage peer confirmation) ===
+     * allocateAndNotify pushes WS chunk_assignment messages and waits for ACKs.
+     * A successful return means every allocated peer has confirmed.
+     * ======================================================================= */
 
     const { allocations, peerDeductions, peerAssignments } = await allocateAndNotify(
       activePeers,
@@ -155,6 +183,97 @@ const uploadFile = async (req, res, next) => {
       replicationFactor,
       fileId
     );
+
+    /* ================= STORE PENDING STATE ================= */
+
+    const sessionId = crypto.randomUUID();
+
+    const timerId = setTimeout(() => {
+      cancelPendingUpload(sessionId);
+    }, PENDING_TTL_MS);
+
+    pendingUploads.set(sessionId, {
+      clientId,
+      fileId,
+      merkleRoot,
+      endDate,
+      filename,
+      fileHash,
+      filesize,
+      replicationFactor,
+      numberOfChunks,
+      chunkInfo,
+      allocations,
+      peerDeductions,
+      peerAssignments,
+      timerId,
+    });
+
+    /* ================= AWAIT CLIENT CONFIRMATION ================= */
+
+    return res.status(202).json({
+      sessionId,
+      fileId,
+      merkleRoot,
+      peers: peerAssignments,
+      expiresIn: PENDING_TTL_MS / 1000,
+    });
+
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * PHASE 2  —  POST /client/upload/confirm
+ *
+ * Client confirms the allocation returned from phase 1. This triggers the DB
+ * transaction that persists the file, chunks, replicas, commitments, relay
+ * sessions, and peer space deductions.
+ *
+ * Request Body:
+ * {
+ *   "sessionId": "uuid"
+ * }
+ *
+ * Response (201):
+ * {
+ *   "fileId": "uuid",
+ *   "merkleRoot": "hex",
+ *   "status": "ALLOCATED",
+ *   "peers": { "<peer_id>": { "token": "hex", "chunkIndexes": [0, 1] }, ... }
+ * }
+ * ───────────────────────────────────────────────────────────────────────────── */
+const confirmUpload = async (req, res, next) => {
+  let txStarted = false;
+  try {
+    const { sessionId } = req.body;
+    const { sub: clientId } = req.user;
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'sessionId is required' });
+    }
+
+    const pending = pendingUploads.get(sessionId);
+
+    if (!pending) {
+      return res.status(404).json({ error: 'Session not found or expired' });
+    }
+
+    if (pending.clientId !== clientId) {
+      return res.status(403).json({ error: 'Session does not belong to this client' });
+    }
+
+    // Claim the session immediately to prevent double-confirm races
+    clearTimeout(pending.timerId);
+    pendingUploads.delete(sessionId);
+
+    const {
+      fileId, merkleRoot, endDate, filename, fileHash, filesize,
+      replicationFactor, numberOfChunks, chunkInfo,
+      allocations, peerDeductions, peerAssignments,
+    } = pending;
 
     /* ================= DB TRANSACTION ================= */
 
@@ -244,7 +363,7 @@ const uploadFile = async (req, res, next) => {
     const sessionValues = [];
     const sessionParams = [];
     p = 1;
-    const expiresAt = new Date(endDate); // relay session lives until the file's end date
+    const expiresAt = new Date(endDate);
 
     for (const [peerId, { token, chunkIndexes }] of Object.entries(peerAssignments)) {
       sessionValues.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
@@ -274,7 +393,7 @@ const uploadFile = async (req, res, next) => {
       fileId,
       merkleRoot,
       status: 'ALLOCATED',
-      peers: peerAssignments, // { peer_id: { token, chunkIndexes } }
+      peers: peerAssignments,
     });
 
   } catch (err) {
@@ -284,4 +403,35 @@ const uploadFile = async (req, res, next) => {
   }
 };
 
-module.exports = { uploadFile };
+/* ─────────────────────────────────────────────────────────────────────────────
+ * OPTIONAL  —  POST /client/upload/cancel
+ *
+ * Explicitly cancel a pending upload before it expires. Notifies peers and
+ * frees the in-memory slot immediately.
+ *
+ * Request Body: { "sessionId": "uuid" }
+ * Response (200): { "cancelled": true }
+ * ───────────────────────────────────────────────────────────────────────────── */
+const cancelUpload = (req, res) => {
+  const { sessionId } = req.body;
+  const { sub: clientId } = req.user;
+
+  if (!sessionId) {
+    return res.status(400).json({ error: 'sessionId is required' });
+  }
+
+  const pending = pendingUploads.get(sessionId);
+
+  if (!pending) {
+    return res.status(404).json({ error: 'Session not found or already expired' });
+  }
+
+  if (pending.clientId !== clientId) {
+    return res.status(403).json({ error: 'Session does not belong to this client' });
+  }
+
+  cancelPendingUpload(sessionId);
+  return res.status(200).json({ cancelled: true });
+};
+
+module.exports = { uploadFile, confirmUpload, cancelUpload };

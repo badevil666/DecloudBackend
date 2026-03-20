@@ -67,7 +67,7 @@ CREATE TABLE  if not exists files (
     chunking_factor INT,
     created_at TIMESTAMP DEFAULT NOW(),
     status TEXT NOT NULL CHECK (
-        status IN ('PENDING','ALLOCATED','EXPIRED')
+        status IN ('PENDING','ALLOCATED','STORED','EXPIRED')
     ),
     end_date TIMESTAMP NOT NULL,
 
@@ -260,6 +260,51 @@ CREATE TABLE  if not exists replica_storage (
 
 --------------------------------------------------
 -- 13. Interval Settlement
+--------------------------------------------------
+
+--------------------------------------------------
+-- 14. Pending Deals (awaiting dual EIP-712 signatures)
+--------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS pending_deals (
+    deal_id          TEXT PRIMARY KEY,
+    file_id          UUID NOT NULL,
+    client_id        UUID NOT NULL,
+    peer_id          UUID NOT NULL,
+
+    client_address   TEXT NOT NULL,
+    peer_address     TEXT NOT NULL,
+    size_bytes       NUMERIC NOT NULL,
+    duration_blocks  NUMERIC NOT NULL,
+    price_wei        NUMERIC NOT NULL,
+    peer_escrow_wei  NUMERIC NOT NULL,
+    interval_count   INT NOT NULL DEFAULT 12,
+
+    client_sig       TEXT,
+    peer_sig         TEXT,
+
+    status           TEXT NOT NULL DEFAULT 'AWAITING_SIGNATURES'
+                     CHECK (status IN (
+                         'AWAITING_SIGNATURES', 'CLIENT_SIGNED', 'PEER_SIGNED',
+                         'SUBMITTING', 'SETTLED', 'FAILED', 'EXPIRED'
+                     )),
+
+    created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at       TIMESTAMP NOT NULL,
+    tx_hash          TEXT,
+    error_message    TEXT,
+
+    FOREIGN KEY (file_id)   REFERENCES files(file_id),
+    FOREIGN KEY (client_id) REFERENCES clients(client_id),
+    FOREIGN KEY (peer_id)   REFERENCES storage_peers(peer_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_deals_file_id ON pending_deals(file_id);
+CREATE INDEX IF NOT EXISTS idx_pending_deals_status  ON pending_deals(status);
+CREATE INDEX IF NOT EXISTS idx_pending_deals_expires ON pending_deals(expires_at);
+
+--------------------------------------------------
+-- 15. Interval Settlement
 --------------------------------------------------
 
 CREATE TABLE  if not exists interval_settlements (

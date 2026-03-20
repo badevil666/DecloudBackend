@@ -4,6 +4,7 @@ const cors = require('cors');
 const morgan = require('morgan');
 require('dotenv').config();
 const { attachPeerWS } = require('./websocket/peerWS');
+const { startProofScheduler } = require('./services/proofService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -56,6 +57,7 @@ attachPeerWS(server);
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  startProofScheduler();
 });
 
 module.exports = app;

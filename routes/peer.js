@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { getNonce, peerLogin, peerRegister } = require('../controllers/authController');
+const authenticate = require('../middleware/auth');
+const { submitPeerDealSignature } = require('../controllers/dealController');
 
 /**
  * GET /peer/login
@@ -71,5 +73,14 @@ router.get('/register', getNonce);
  * }
  */
 router.post('/register', peerRegister);
+
+/**
+ * POST /peer/deals/:dealId/sign
+ * Submit an EIP-712 signature for a pending deal (peer confirmation).
+ *
+ * Request Body: { "signature": "0x..." }
+ * Response (200): { "status": "accepted", "dealId": "0x..." }
+ */
+router.post('/deals/:dealId/sign', authenticate('STORAGE_PEER'), submitPeerDealSignature);
 
 module.exports = router;
