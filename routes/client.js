@@ -6,6 +6,7 @@ const { uploadFile, confirmUpload, cancelUpload } = require('../controllers/uplo
 const { getFiles } = require('../controllers/fileController');
 const { submitClientDealSignature, getDealStatus, getFileDeals, getAllDeals } = require('../controllers/dealController');
 const { requestDownload } = require('../controllers/downloadController');
+const { getPeerCount } = require('../websocket/peerWS');
 
 /**
  * GET /client/login
@@ -176,5 +177,13 @@ router.get('/files/:fileId/deals', authenticate('CLIENT'), getFileDeals);
 router.post('/files/:fileId/download', authenticate('CLIENT'), requestDownload);
 
 router.get('/deals', authenticate('CLIENT'), getAllDeals);
+
+/**
+ * GET /client/peers/online
+ * Returns the number of storage peers currently connected via WebSocket.
+ */
+router.get('/peers/online', authenticate('CLIENT'), (req, res) => {
+    res.json({ count: getPeerCount() });
+});
 
 module.exports = router;
