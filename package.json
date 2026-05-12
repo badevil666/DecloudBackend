@@ -28,6 +28,7 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "hardhat": "^2.28.6",
     "nodemon": "^3.0.1",
     "solc": "^0.8.34"
   }

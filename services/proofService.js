@@ -30,15 +30,16 @@
 
 const crypto = require('crypto');
 const { query } = require('../config/database');
-const { sendProofChallenge } = require('../websocket/peerWS');
+const { sendProofChallenge, sendRewardIssued } = require('../websocket/peerWS');
 const { releaseDealInterval, slashDealOnChain } = require('./settlementService');
 const { ethers } = require('ethers');
+const network = require('../config/network');
 
 // How often the scheduler polls for due intervals (ms)
-const POLL_INTERVAL_MS = 30_000;
+const POLL_INTERVAL_MS = 3_000;
 
 // How long to wait for a peer's proof_response before declaring a timeout (ms)
-const PROOF_TIMEOUT_MS = 60_000;
+const PROOF_TIMEOUT_MS = 20_000;
 
 // In-flight challenges: dealId:interval → { resolve, reject, timer }
 const pendingChallenges = new Map();
@@ -87,21 +88,28 @@ async function verifyProofResponse(peerId, dealId, interval, hash) {
   pending.resolve({ peerId, hash });
 }
 
+// Cache: dealId → start block Unix timestamp (ms). Populated on first encounter.
+const _dealStartMs = new Map();
+
 // ─── Internal: scheduler tick ─────────────────────────────────────────────────
 
 async function runSchedulerTick() {
-  const rpcUrl = process.env.SEPOLIA_RPC_URL;
+  const rpcUrl = network.rpcUrl;
   if (!rpcUrl) return; // Not configured yet
 
+  let provider;
   let currentBlock;
   try {
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    provider = new ethers.JsonRpcProvider(rpcUrl);
     currentBlock = Number(await provider.getBlockNumber());
   } catch {
     return; // RPC unavailable — skip tick
   }
 
-  // Find all ACTIVE storage contracts with intervals due
+  const isAnvil = network.chainId === 31337n || network.chainId === 31337;
+
+  // Find all ACTIVE storage contracts with intervals due.
+  // Join files to get end_date — used for wall-clock scheduling on Anvil.
   const { rows } = await query(
     `SELECT
        sc.file_id         AS "fileId",
@@ -110,11 +118,14 @@ async function runSchedulerTick() {
        sc.end_block       AS "endBlock",
        sc.interval_count  AS "intervalCount",
        sc.intervals_done  AS "intervalsDone",
+       sc.total_reward    AS "totalReward",
        pd.deal_id         AS "dealId",
        pd.chunk_hashes    AS "chunkHashes",
-       pd.peer_address    AS "peerAddress"
+       pd.peer_address    AS "peerAddress",
+       f.end_date         AS "endDate"
      FROM storage_contracts sc
      JOIN pending_deals pd ON pd.file_id = sc.file_id::text AND pd.peer_id = sc.peer_id::text
+     JOIN files          f  ON f.file_id  = sc.file_id
      WHERE sc.status = 'ACTIVE'
        AND sc.intervals_done < sc.interval_count
        AND pd.status = 'SETTLED'`,
@@ -124,11 +135,28 @@ async function runSchedulerTick() {
   for (const row of rows) {
     const intervalsDone = row.intervalsDone ?? 0;
     const nextInterval  = intervalsDone + 1;
-    const totalBlocks   = Number(row.endBlock) - Number(row.startBlock);
-    const blocksPerInterval = Math.floor(totalBlocks / row.intervalCount);
-    const nextDueBlock  = Number(row.startBlock) + nextInterval * blocksPerInterval;
 
-    if (currentBlock < nextDueBlock) continue; // Not due yet
+    // ── Anvil: pure wall-clock scheduling ────────────────────────────────────
+    // Block counts are unreliable on Anvil — every tx auto-mines a block,
+    // making the counter race ahead unpredictably.
+    // Instead: record the real Unix time when the deal first appears, then
+    // spread 10 intervals evenly across the file's actual end_date.
+    if (isAnvil) {
+      if (!_dealStartMs.has(row.dealId)) {
+        _dealStartMs.set(row.dealId, Date.now());
+      }
+      const startMs       = _dealStartMs.get(row.dealId);
+      const endMs         = new Date(row.endDate).getTime();
+      const totalDurationMs = Math.max(endMs - startMs, 1);
+      const intervalDueMs = startMs + (nextInterval / row.intervalCount) * totalDurationMs;
+      if (Date.now() < intervalDueMs) continue;
+    } else {
+      // ── Production (Sepolia): block-number scheduling ──────────────────────
+      const totalBlocks       = Number(row.endBlock) - Number(row.startBlock);
+      const blocksPerInterval = Math.max(1, Math.floor(totalBlocks / row.intervalCount));
+      const nextDueBlock      = Number(row.startBlock) + nextInterval * blocksPerInterval;
+      if (currentBlock < nextDueBlock) continue;
+    }
 
     // Don't re-challenge if already in-flight
     const key = `${row.dealId}:${nextInterval}`;
@@ -168,8 +196,8 @@ async function challengePeer(row, interval) {
     });
   });
 
-  // Send challenge
-  sendProofChallenge(peerId, { dealId, interval, nonce });
+  // Send challenge — include fileId so the peer knows which file's chunks to hash
+  sendProofChallenge(peerId, { dealId, fileId: row.fileId, interval, nonce });
 
   let response;
   try {
@@ -205,8 +233,16 @@ async function challengePeer(row, interval) {
         `UPDATE storage_contracts SET status = 'COMPLETED' WHERE file_id = $1 AND peer_id = $2`,
         [row.fileId, row.peerId]
       );
+      _dealStartMs.delete(dealId); // clean up cache
     }
     console.log(`[proofService] Interval ${interval} released for deal ${dealId.slice(0, 12)}…  tx: ${txHash}`);
+
+    // Notify the peer so it can refresh its balance and transaction history
+    const priceWei = BigInt(row.totalReward ?? 0);
+    const rewardWei = interval === 1
+      ? priceWei - (priceWei * 1023n / 1024n)
+      : priceWei >> BigInt(11 - interval);
+    sendRewardIssued(row.peerId, { dealId, interval, rewardWei: rewardWei.toString() });
   } catch (err) {
     console.error(`[proofService] releaseInterval failed for ${key}: ${err.message}`);
   }
@@ -219,6 +255,7 @@ async function handleProofFailure(row, interval, reason) {
       `UPDATE storage_contracts SET status = 'SLASHED' WHERE file_id = $1 AND peer_id = $2`,
       [row.fileId, row.peerId]
     );
+    _dealStartMs.delete(row.dealId); // clean up cache
     console.log(`[proofService] Deal ${row.dealId.slice(0, 12)}… slashed at interval ${interval}. reason: ${reason}  tx: ${txHash}`);
   } catch (err) {
     console.error(`[proofService] slashDeal failed: ${err.message}`);

@@ -28,6 +28,7 @@ const { ethers } = require('ethers');
 const { query }  = require('../config/database');
 const { buildDealValue, recoverDealSigner } = require('../utils/signDeal');
 const { submitDeal } = require('../services/settlementService');
+const { escrowAddress: ESCROW_ADDRESS, chainId: CHAIN_ID } = require('../config/network');
 // Lazy require to break circular dependency: peerWS → dealController → peerWS
 function sendDealSigningRequest(...args) {
   require('../websocket/peerWS').sendDealSigningRequest(...args);
@@ -36,10 +37,10 @@ function sendDealSigningRequest(...args) {
 const DEAL_TTL_HOURS = 24;
 const INTERVAL_COUNT = 10;
 
-// Pricing: 0.0000001 DCLD per KB per second
-// priceWei = sizeBytes * durationBlocks * 12 * 1e11 / 1024
-// (12 = seconds per block, 1e11 = 0.0000001 DCLD in wei, 1024 = bytes per KB)
-const PRICE_NUMERATOR  = 12n * 100_000_000_000n; // 12 * 1e11
+// Pricing: ~0.00833 DCLD per KB per second (1 DCLD per KB per 2 minutes)
+// priceWei = sizeBytes * durationBlocks * 1e17 / 1024
+// → 100 KB file stored for 2 min (10 blocks) ≈ 100 DCLD per replica
+const PRICE_NUMERATOR   = 100_000_000_000_000_000n; // 1e17
 const PRICE_DENOMINATOR = 1024n;
 
 // Escrow ratio = 20% of peer price
@@ -90,9 +91,9 @@ function uuidToBytes32(uuid) {
  * @param {string} fileId
  */
 async function createDealsForFile(fileId) {
-  const escrowAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+  const escrowAddress = ESCROW_ADDRESS;
   if (!escrowAddress) {
-    console.warn('[dealController] ESCROW_CONTRACT_ADDRESS not set — skipping deal creation');
+    console.warn('[dealController] escrowAddress not configured for this network — skipping deal creation');
     return;
   }
 
@@ -112,7 +113,9 @@ async function createDealsForFile(fileId) {
   const nowMs          = Date.now();
   const endMs          = new Date(file.end_date).getTime();
   const durationSec    = Math.max(0, Math.floor((endMs - nowMs) / 1000));
-  const durationBlocks = BigInt(Math.ceil(durationSec / 12)); // ~12s per Sepolia block
+  // Anvil mines on demand (1s per block when driven by scheduler); Sepolia ≈ 12s
+  const blockTimeSec   = (require('../config/network').chainId === 31337n) ? 1 : 12;
+  const durationBlocks = BigInt(Math.ceil(durationSec / blockTimeSec));
   const sizeBytes      = BigInt(file.file_size);
   const expiresAt      = new Date(nowMs + DEAL_TTL_HOURS * 3_600_000);
   const fileIdBytes32  = uuidToBytes32(file.file_id);
@@ -239,9 +242,9 @@ async function processSignature(dealId, signature, role, expectedAddress) {
     );
   }
 
-  const escrowAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+  const escrowAddress = ESCROW_ADDRESS;
   if (!escrowAddress) {
-    throw Object.assign(new Error('ESCROW_CONTRACT_ADDRESS not configured'), { status: 500 });
+    throw Object.assign(new Error('escrowAddress not configured for this network'), { status: 500 });
   }
 
   const chunkHashes = deal.chunk_hashes
@@ -424,7 +427,8 @@ const getFileDeals = async (req, res, next) => {
     return res.json({
       fileId,
       clientAddress: wallet_address,
-      escrowAddress: process.env.ESCROW_CONTRACT_ADDRESS ?? null,
+      escrowAddress: ESCROW_ADDRESS ?? null,
+      chainId:       CHAIN_ID?.toString() ?? null,
       deals: rows,
     });
   } catch (err) {
@@ -468,7 +472,79 @@ const getAllDeals = async (req, res, next) => {
       [clientId]
     );
 
-    return res.json({ deals: rows });
+    return res.json({ deals: rows, escrowAddress: ESCROW_ADDRESS ?? null, chainId: CHAIN_ID?.toString() ?? null });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /client/deals/:dealId/retry
+ * Reset a FAILED deal back to PENDING so it can be re-signed.
+ * Clears both signatures, extends the TTL, and re-notifies the peer.
+ */
+const retryDeal = async (req, res, next) => {
+  try {
+    const { dealId } = req.params;
+    const { sub: clientId } = req.user;
+
+    if (!dealId || !dealId.startsWith('0x') || dealId.length !== 66) {
+      return res.status(400).json({ error: 'dealId must be a 0x-prefixed 32-byte hex string' });
+    }
+
+    const { rows } = await query(
+      `SELECT * FROM pending_deals WHERE deal_id = $1 AND client_id = $2`,
+      [dealId, clientId]
+    );
+
+    if (rows.length === 0) return res.status(404).json({ error: 'Deal not found' });
+
+    const deal = rows[0];
+
+    if (deal.status !== 'FAILED') {
+      return res.status(409).json({ error: `Cannot retry a deal in status: ${deal.status}` });
+    }
+
+    const newExpiresAt = new Date(Date.now() + DEAL_TTL_HOURS * 3_600_000);
+
+    const { rows: updated } = await query(
+      `UPDATE pending_deals
+       SET status      = 'PENDING',
+           client_sig  = NULL,
+           peer_sig    = NULL,
+           error_message = NULL,
+           tx_hash     = NULL,
+           expires_at  = $1
+       WHERE deal_id = $2
+       RETURNING *`,
+      [newExpiresAt, dealId]
+    );
+
+    const d = updated[0];
+
+    const chunkHashes = d.chunk_hashes
+      ? (typeof d.chunk_hashes === 'string' ? JSON.parse(d.chunk_hashes) : d.chunk_hashes)
+      : [];
+
+    const escrowAddress = ESCROW_ADDRESS;
+    if (escrowAddress) {
+      sendDealSigningRequest(d.peer_id, {
+        dealId:         d.deal_id,
+        fileId:         d.file_id_bytes32,
+        merkleRoot:     d.file_merkle_root,
+        clientAddress:  d.client_address,
+        peerAddress:    d.peer_address,
+        sizeBytes:      d.size_bytes,
+        durationBlocks: d.duration_blocks,
+        priceWei:       d.price_wei,
+        peerEscrowWei:  d.peer_escrow_wei,
+        chunkHashes,
+        escrowAddress,
+      });
+    }
+
+    console.log(`[dealController] Retrying deal ${dealId} — peer: ${d.peer_id}`);
+    return res.status(200).json({ status: 'retrying', dealId });
   } catch (err) {
     next(err);
   }
@@ -481,4 +557,5 @@ module.exports = {
   getDealStatus,
   getFileDeals,
   getAllDeals,
+  retryDeal,
 };

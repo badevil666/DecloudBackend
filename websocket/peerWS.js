@@ -371,18 +371,55 @@ function sendDealSigningRequest(peerId, dealData) {
  * Send a storage-proof challenge to a peer.
  * Fire-and-forget — peer responds with proof_response.
  *
- * { type: "proof_challenge", dealId, interval, nonce }
+ * { type: "proof_challenge", dealId, fileId, interval, nonce }
  */
-function sendProofChallenge(peerId, { dealId, interval, nonce }) {
+function sendProofChallenge(peerId, { dealId, fileId, interval, nonce }) {
   const ws = connectedPeers.get(peerId);
   if (ws && ws.readyState === WebSocket.OPEN) {
     wsLog(peerId, `→ proof_challenge  dealId: ${dealId.slice(0, 12)}…  interval: ${interval}`);
-    ws.send(JSON.stringify({ type: 'proof_challenge', dealId, interval, nonce }));
+    ws.send(JSON.stringify({ type: 'proof_challenge', dealId, fileId, interval, nonce }));
+  }
+}
+
+function sendRewardIssued(peerId, { dealId, interval, rewardWei }) {
+  const ws = connectedPeers.get(peerId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    wsLog(peerId, `→ reward_issued  dealId: ${dealId.slice(0, 12)}…  interval: ${interval}`);
+    ws.send(JSON.stringify({ type: 'reward_issued', dealId, interval, rewardWei }));
+  }
+}
+
+/**
+ * Tell a peer to permanently delete all stored chunks for a file.
+ * Fire-and-forget — no ACK expected.
+ *
+ * { type: "delete_chunks", fileId }
+ */
+/**
+ * Notify a peer that a deal was slashed because the client deleted the file.
+ * Fire-and-forget.
+ *
+ * { type: "deal_slashed_by_client", dealId, fileId }
+ */
+function sendDealSlashedByClient(peerId, dealId, fileId) {
+  const ws = connectedPeers.get(peerId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    wsLog(peerId, `→ deal_slashed_by_client  dealId: ${dealId.slice(0, 12)}…`);
+    ws.send(JSON.stringify({ type: 'deal_slashed_by_client', dealId, fileId }));
+  }
+}
+
+function sendDeleteChunks(peerId, fileId) {
+  const ws = connectedPeers.get(peerId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    wsLog(peerId, `→ delete_chunks  fileId: ${fileId}`);
+    ws.send(JSON.stringify({ type: 'delete_chunks', fileId }));
   }
 }
 
 module.exports = {
   attachPeerWS, connectedPeers, getPeerCount,
   sendAssignment, sendCancel, sendDownloadRequest,
-  sendDealSigningRequest, sendProofChallenge,
+  sendDealSigningRequest, sendProofChallenge, sendRewardIssued,
+  sendDeleteChunks, sendDealSlashedByClient,
 };

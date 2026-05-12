@@ -16,8 +16,7 @@
  */
 
 const { ethers } = require('ethers');
-
-const CHAIN_ID = 11155111n; // Sepolia
+const { chainId: CHAIN_ID } = require('../config/network');
 
 /**
  * The EIP-712 types. Must match DEAL_TYPEHASH in StorageEscrow.sol exactly —

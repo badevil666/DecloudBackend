@@ -1,4 +1,6 @@
 const { query } = require('../config/database');
+const { sendDeleteChunks, sendDealSlashedByClient } = require('../websocket/peerWS');
+const { slashDealOnChain } = require('../services/settlementService');
 
 const HEARTBEAT_THRESHOLD_MINUTES = 5;
 
@@ -145,4 +147,66 @@ const getFiles = async (req, res, next) => {
   }
 };
 
-module.exports = { getFiles };
+/**
+ * DELETE /client/files/:fileId
+ * Permanently delete a file and all associated data.
+ * Only the file owner can delete.
+ */
+const deleteFile = async (req, res, next) => {
+  try {
+    const { sub: clientId } = req.user;
+    const { fileId } = req.params;
+
+    const check = await query(
+      'SELECT file_id FROM files WHERE file_id::text = $1 AND owner_id = $2',
+      [fileId, clientId],
+    );
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    // Slash all active on-chain deals → refunds remaining DCLD to client
+    const dealRows = await query(
+      `SELECT pd.deal_id AS "dealId", sc.peer_id AS "peerId"
+       FROM storage_contracts sc
+       JOIN pending_deals pd
+         ON pd.file_id::text = sc.file_id::text
+        AND pd.peer_id::text = sc.peer_id::text
+        AND pd.status = 'SETTLED'
+       WHERE sc.file_id::text = $1
+         AND sc.status = 'ACTIVE'`,
+      [fileId],
+    );
+    for (const deal of dealRows.rows) {
+      sendDealSlashedByClient(deal.peerId, deal.dealId, fileId);
+      // Slash on-chain (refunds client, forfeits peer escrow)
+      slashDealOnChain(deal.dealId).catch(err =>
+        console.error(`[deleteFile] slashDeal ${deal.dealId.slice(0, 10)} failed: ${err.message}`),
+      );
+    }
+
+    // Notify all connected peers holding this file's chunks to delete them
+    const peerRows = await query(
+      `SELECT DISTINCT cr.current_peer_id AS "peerId"
+       FROM file_chunks fc
+       JOIN chunk_replicas cr ON cr.chunk_id = fc.chunk_id AND cr.status = 'ACTIVE'
+       WHERE fc.file_id::text = $1`,
+      [fileId],
+    );
+    for (const row of peerRows.rows) {
+      sendDeleteChunks(row.peerId, fileId);
+    }
+
+    // Delete tables that lack ON DELETE CASCADE first
+    await query('DELETE FROM pending_deals     WHERE file_id::text = $1', [fileId]);
+    await query('DELETE FROM storage_contracts WHERE file_id::text = $1', [fileId]);
+    // file_chunks, chunk_replicas, relay_sessions all cascade from files
+    await query('DELETE FROM files WHERE file_id::text = $1', [fileId]);
+
+    return res.json({ deleted: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getFiles, deleteFile };

@@ -13,6 +13,7 @@ const api = require('./routes/index');
 const client = require('./routes/client');
 const peer = require('./routes/peer');
 const logger = require('./middleware/logger');
+const network = require('./config/network');
 
 // Middleware
 app.use(cors());
@@ -27,6 +28,16 @@ app.get('/', (_req, res) => {
     message: 'Welcome to DecloudBackend API',
     status: 'running',
     version: '1.0.0'
+  });
+});
+
+// Public network config — no auth required; lets any client/peer resolve addresses
+app.get('/network-config', (_req, res) => {
+  res.json({
+    escrowAddress:    network.escrowAddress    ?? null,
+    dcldTokenAddress: network.dcldTokenAddress ?? null,
+    chainId:          network.chainId?.toString() ?? null,
+    rpcUrl:           network.rpcUrl           ?? null,
   });
 });
 

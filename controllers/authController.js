@@ -190,6 +190,7 @@ const peerLogin = async (req, res, next) => {
 
 // POST /peer/register
 // Body: { wallet_address, nonce, signature, os_type, declared_capacity }
+// declared_capacity: positive integer in bytes (e.g. 107374182400 for 100 GB)
 const peerRegister = async (req, res, next) => {
   try {
     const { wallet_address, nonce, signature, os_type, declared_capacity } = req.body;
@@ -201,9 +202,10 @@ const peerRegister = async (req, res, next) => {
       declared_capacity === undefined ||
       declared_capacity === null ||
       typeof declared_capacity !== 'number' ||
+      !Number.isInteger(declared_capacity) ||
       declared_capacity <= 0
     ) {
-      return res.status(400).json({ error: 'declared_capacity must be a positive number' });
+      return res.status(400).json({ error: 'declared_capacity must be a positive integer (bytes)' });
     }
 
     const { walletAddress } = await verifyNonceAndSignature({ walletAddress: wallet_address, nonce, signature });

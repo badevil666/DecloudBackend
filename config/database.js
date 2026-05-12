@@ -1,6 +1,10 @@
 // Neon (PostgreSQL) database configuration using `pg`
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 require('dotenv').config();
+
+// Parse TIMESTAMP WITHOUT TIME ZONE (OID 1114) as UTC.
+// pg's default treats the raw string as local time, which breaks on non-UTC machines.
+types.setTypeParser(1114, str => (str ? new Date(str + 'Z') : null));
 
 if (!process.env.DATABASE_URL) {
   console.warn(
